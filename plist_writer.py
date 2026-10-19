@@ -962,10 +962,30 @@ class TUI:
         self.max_x = 0
         self.scroll_top = 0
         self.scroll_left = 0
+        self._colors_ok = False
+        self._color_edit = 0
+        self._color_msg = 0
+
+    def _init_colors(self):
+        """安全初始化颜色，失败不崩溃"""
+        try:
+            curses.start_color()
+            curses.use_default_colors()
+            # 颜色对 1 = 蓝底白字（编辑区），颜色对 2 = 红字（消息）
+            curses.init_pair(1, curses.COLOR_WHITE, curses.COLOR_BLUE)
+            curses.init_pair(2, curses.COLOR_RED, -1)
+            self._colors_ok = True
+            self._color_edit = curses.color_pair(1)
+            self._color_msg = curses.color_pair(2)
+        except Exception:
+            self._colors_ok = False
+            self._color_edit = curses.A_REVERSE
+            self._color_msg = curses.A_BOLD
 
     # ── 运行 ───────────────────────────────────────────────────
 
     def run(self):
+        self._init_colors()
         curses.curs_set(0)
         curses.noecho()
         curses.cbreak()
@@ -979,7 +999,10 @@ class TUI:
 
         while True:
             self.max_y, self.max_x = self.stdscr.getmaxyx()
-            self._draw()
+            try:
+                self._draw()
+            except curses.error:
+                pass  # 屏幕过小或字符集不支持，跳过本次绘制
             key = self.stdscr.getch()
             self._handle_key(key)
             if not self.running:
@@ -997,9 +1020,9 @@ class TUI:
 
         # 标题栏
         self._attr(0, 0, w, curses.A_REVERSE | curses.A_BOLD)
-        self.stdscr.addstr(0, 2, " 🍎 Apple Plist Writer TUI ", curses.A_REVERSE | curses.A_BOLD)
-        mode_label = "[EDIT]" if self.edit_mode else f"[MODE: {self.view.upper()}]"
-        self.stdscr.addstr(0, w - len(mode_label) - 1, mode_label, curses.A_REVERSE)
+        self._add(0, 2, " Apple Plist Writer TUI ")
+        mode_label = "[EDIT]" if self.edit_mode else f"[{self.view.upper()}]"
+        self._add(0, max(2, w - len(mode_label) - 1), mode_label)
 
         if self.view == "templates":
             self._draw_templates(h, w)
@@ -1010,41 +1033,44 @@ class TUI:
 
         # 底部状态栏
         self._attr(h - 3, 0, w, curses.A_REVERSE)
-        self.stdscr.addstr(h - 3, 2, f" Template: {self.current_template or '— 未加载 —':<30} ", curses.A_REVERSE)
+        self._add(h - 3, 2, f" Template: {self.current_template or '-- none --':<30} ")
 
         if self.edit_mode:
-            self._attr(h - 2, 0, w, curses.color_pair(1))
-            prompt = f" Key: {self.edit_key}"
-            self.stdscr.addstr(h - 2, 2, prompt)
-            val_display = f"Value: {self.edit_value[:w-len(prompt)-4]}"
-            self.stdscr.addstr(h - 2, 2 + len(prompt), val_display)
+            self._attr(h - 2, 0, w, self._color_edit)
+            self._add(h - 2, 2, f" Key: {self.edit_key}")
+            self._add(h - 2, 2 + len(f" Key: {self.edit_key}") + 1,
+                      f"Value: {self.edit_value[:max(0, w-20-len(self.edit_key))]}")
             curses.curs_set(1)
         else:
             curses.curs_set(0)
             self._attr(h - 2, 0, w, curses.A_DIM)
-            shortcuts = " ↑↓/Tab:导航  Enter:选择  e:编辑  a:追加  d:删除  s:保存  q:退出 "
-            self.stdscr.addstr(h - 2, 2, shortcuts[:w - 4])
+            self._add(h - 2, 2, " arrow:nav  Enter:load  e:edit  a:append  d:delete  s:save  q:quit ")
 
         if self.message:
-            self._attr(h - 1, 0, w, curses.A_BOLD | curses.color_pair(2))
-            self.stdscr.addstr(h - 1, 2, self.message[:w - 4])
+            self._attr(h - 1, 0, w, curses.A_BOLD | self._color_msg)
+            self._add(h - 1, 2, self.message[:w - 4])
             self.message = ""
 
         self.stdscr.refresh()
+
+    def _add(self, y, x, text, attr=0):
+        """安全的 addstr，终端不匹配时静默跳过"""
+        try:
+            self.stdscr.addstr(y, x, text[:self.max_x - x], attr)
+        except curses.error:
+            pass
 
     def _draw_templates(self, h, w):
         """三栏：分类 | 模板列表 | 预览"""
         col_w = [22, 26, w - 50]
         col_x = [0, col_w[0], col_w[0] + col_w[1]]
 
-        # 分类列
         cats = list(self.TEMPLATE_CATEGORIES.keys())
         for i, cat in enumerate(cats):
             attr = curses.A_REVERSE if i == self.category_idx else curses.A_NORMAL
             self._attr(1 + i, col_x[0], col_w[0], attr)
-            self.stdscr.addstr(1 + i, col_x[0] + 2, cat[:col_w[0] - 2])
+            self._add(1 + i, col_x[0] + 2, cat[:col_w[0] - 2])
 
-        # 模板列表列
         items = self.TEMPLATE_CATEGORIES[cats[self.category_idx]]
         list_h = h - 4
         for i in range(min(list_h, len(items))):
@@ -1052,19 +1078,16 @@ class TUI:
             if real_idx >= len(items):
                 break
             name = items[real_idx]
-            data = COMMON_STRUCTURES[name]
-            sample = list(data.keys())[:2]
             attr = (curses.A_REVERSE | curses.A_BOLD if real_idx == self.item_idx
                     else curses.A_NORMAL)
             self._attr(1 + i, col_x[1], col_w[1], attr)
-            self.stdscr.addstr(1 + i, col_x[1] + 2, name[:col_w[1] - 3])
+            self._add(1 + i, col_x[1] + 2, name[:col_w[1] - 3])
 
-        # 预览列
         if 0 <= self.item_idx < len(items):
             tname = items[self.item_idx]
             preview = COMMON_STRUCTURES[tname]
             self._attr(1, col_x[2], col_w[2], curses.A_BOLD)
-            self.stdscr.addstr(1, col_x[2] + 2, f"模板: {tname}  ({len(preview)} keys)")
+            self._add(1, col_x[2] + 2, f"Template: {tname}  ({len(preview)} keys)")
             row = 2
             for key in list(preview.keys())[:list_h - 4]:
                 if row >= h - 3:
@@ -1072,39 +1095,36 @@ class TUI:
                 self._attr(row, col_x[2], col_w[2], curses.A_DIM)
                 v = preview[key]
                 vstr = repr(v) if not isinstance(v, (dict, list)) else type(v).__name__
-                line = f"  {key}: {vstr}"
-                self.stdscr.addstr(row, col_x[2] + 1, line[:col_w[2] - 2])
+                self._add(row, col_x[2] + 1, f"  {key}: {vstr}")
                 row += 1
 
         # 分隔线
         for x in [col_w[0], col_w[0] + col_w[1]]:
             for y in range(1, h - 3):
-                try:
-                    self.stdscr.addstr(y, x, "│")
-                except Exception:
-                    pass
+                self._add(y, x, "│")
 
     def _draw_structure(self, h, w):
         """显示当前 builder.data 的树形结构"""
         if not self.builder.data:
-            self._attr(2, 2, w, curses.A_DIM)
-            self.stdscr.addstr(2, 2, "（未加载模板，请先在 Templates 视图中加载）")
+            self._add(2, 2, "(No template loaded. Press Enter to load one in Templates view.)")
             return
         lines = self._build_tree(self.builder.data, indent=0)
         for i, (indent, key, val, is_last) in enumerate(lines):
             if i >= h - 4:
                 break
-            line = "  " * indent + ("└─ " if is_last else "├─ ") + key
+            prefix = "`-- " if is_last else "|-- "
+            line = "  " * indent + prefix + key
             if val is not None:
-                line += f": {repr(val) if len(repr(val)) < 40 else repr(val)[:37]+'...'}"
-            self._attr(1 + i, 0, w, curses.A_NORMAL)
-            self.stdscr.addstr(1 + i, 1, line[:w - 2])
+                vstr = repr(val)
+                if len(vstr) > 50:
+                    vstr = vstr[:47] + "..."
+                line += f": {vstr}"
+            self._add(1 + i, 1, line[:w - 2])
 
     def _draw_help(self, h, w):
         lines = HELP_TUI.splitlines()
         for i, line in enumerate(lines[:h - 4]):
-            self._attr(1 + i, 0, w, curses.A_NORMAL)
-            self.stdscr.addstr(1 + i, 2, line[:w - 4])
+            self._add(1 + i, 2, line[:w - 4])
 
     def _build_tree(self, data, indent=0, parent_is_last=False):
         lines = []
@@ -1271,11 +1291,14 @@ class TUI:
     # ── 辅助 ───────────────────────────────────────────────────
 
     def _attr(self, y, x, w, attr):
-        """在指定区域应用属性（背景色清除）"""
+        """安全绘制背景（终端不支持时不崩溃）"""
         try:
             self.stdscr.addstr(y, x, " " * min(w, self.max_x - x), attr)
-        except Exception:
-            pass
+        except curses.error:
+            try:
+                self.stdscr.addstr(y, x, " ", attr)
+            except curses.error:
+                pass
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1933,6 +1956,19 @@ def _colorize_xml(xml: str) -> str:
 #  主入口
 # ═══════════════════════════════════════════════════════════════
 
+def _tui_main(stdscr, args=None):
+    app = TUI(stdscr)
+    tmpl = getattr(args, "template", None)
+    if tmpl:
+        try:
+            app.builder.load_template(tmpl)
+            app.current_template = tmpl
+            app.view = "structure"
+        except Exception as e:
+            app.message = f"Template error: {e}"
+    app.run()
+
+
 if __name__ == "__main__":
     parser = build_argparser()
     args = parser.parse_args()
@@ -1946,14 +1982,21 @@ if __name__ == "__main__":
     # 无 command → 启动默认的文字用户界面
     if not args.command:
         if args.tui:
-            curses.wrapper(lambda s: _tui_main(s, None))
+            # 兜底 TERM，防止终端类型不支持 curses
+            if not os.environ.get("TERM"):
+                os.environ["TERM"] = "xterm-256color"
+            try:
+                curses.wrapper(lambda s: _tui_main(s, args))
+            except Exception as e:
+                # TTY 不支持 / 终端太小 / 颜色不支持 → 降级到 CLI
+                print(f"TUI error: {e}", file=sys.stderr)
+                print("Falling back to CLI mode.", file=sys.stderr)
+                run_cli()
         else:
             run_cli()
         sys.exit(0)
 
-    # 有 command 时忽略 --tui（command 模式不支持 TUI）
-    # （保留 builder 注入，后续可扩展）
-
+    # 有 command 时忽略 --tui
     dispatch = {
         "init":       cmd_init,
         "set":        cmd_set,
